@@ -15,19 +15,25 @@ const Plan = () => {
   const [procedures, setProcedures] = useState([]);
   const [planProcedures, setPlanProcedures] = useState([]);
   const [users, setUsers] = useState([]);
+  const [loadError, setLoadError] = useState(null);
 
   useEffect(() => {
     (async () => {
-      var procedures = await getProcedures();
-      var planProcedures = await getPlanProcedures(id);
-      var users = await getUsers();
+      try {
+        var procedures = await getProcedures();
+        var planProcedures = await getPlanProcedures(id);
+        var users = await getUsers();
 
-      var userOptions = [];
-      users.map((u) => userOptions.push({ label: u.name, value: u.userId }));
+        var userOptions = [];
+        users.map((u) => userOptions.push({ label: u.name, value: u.userId }));
 
-      setUsers(userOptions);
-      setProcedures(procedures);
-      setPlanProcedures(planProcedures);
+        setUsers(userOptions);
+        setProcedures(procedures);
+        setPlanProcedures(planProcedures);
+        setLoadError(null);
+      } catch (err) {
+        setLoadError("Failed to load plan data. Please refresh the page.");
+      }
     })();
   }, [id]);
 
@@ -58,6 +64,11 @@ const Plan = () => {
         <div className="d-flex justify-content-center">
           <h2>OEC Interview Frontend</h2>
         </div>
+        {loadError && (
+          <div className="alert alert-danger mt-3" role="alert">
+            {loadError}
+          </div>
+        )}
         <div className="row mt-4">
           <div className="col">
             <div className="card shadow">
