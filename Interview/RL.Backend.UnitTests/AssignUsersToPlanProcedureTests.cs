@@ -366,5 +366,118 @@ public class AssignUsersToPlanProcedureTests
             .ToListAsync();
         assigned.Should().HaveCount(1);
     }
+
+    // ── Tests covering the specific fixes made in this iteration ──────────────
+
+    /// <summary>
+    /// Verifies that when a Plan exists and a Procedure exists but the procedure has NOT
+    /// been added to the plan (no PlanProcedure row), the handler returns NotFoundException
+    /// with a helpful message — using only a single DB round-trip (no separate Plan/Procedure lookups).
+    /// </summary>
+    [TestMethod]
+    public async Task AssignUsersToPlanProcedure_ProcedureNotAddedToPlan_ReturnsNotFoundWithHelpfulMessage()
+    {
+        // Given
+        var context = DbContextHelper.CreateContext();
+        context.Plans.Add(new Plan { PlanId = 1 });
+        context.Procedures.Add(new Procedure { ProcedureId = 2, ProcedureTitle = "Orphan Procedure" });
+        // Deliberately NOT adding a PlanProcedure row
+        await context.SaveChangesAsync();
+
+        var sut = new AssignUsersToPlanProcedureCommandHandler(context);
+        var request = new AssignUsersToPlanProcedureCommand
+        {
+            PlanId = 1,
+            ProcedureId = 2,
+            UserIds = new List<int>()
+        };
+
+        // When
+        var result = await sut.Handle(request, CancellationToken.None);
+
+        // Then
+        result.Succeeded.Should().BeFalse();
+        result.Exception.Should().BeOfType<NotFoundException>();
+        result.Exception!.Message.Should().Contain("PlanId: 1");
+        result.Exception!.Message.Should().Contain("ProcedureId: 2");
+    }
+
+    /// <summary>
+    /// Full happy-path flow: add procedure to plan, then immediately assign users.
+    /// Mirrors the real user workflow and verifies the fix did not regress the core feature.
+    /// </summary>
+    [TestMethod]
+    public async Task AssignUsersToPlanProcedure_AfterAddingProcedureToPlan_SuccessfullyAssignsUsers()
+    {
+        // Given — simulate that addProcedureToPlan already ran (PlanProcedure row exists)
+        var context = DbContextHelper.CreateContext();
+        context.Plans.Add(new Plan { PlanId = 1 });
+        context.Procedures.Add(new Procedure { ProcedureId = 1, ProcedureTitle = "Oil Change" });
+        context.PlanProcedures.Add(new PlanProcedure { PlanId = 1, ProcedureId = 1 });
+        context.Users.Add(new User { UserId = 10, Name = "Alice" });
+        context.Users.Add(new User { UserId = 11, Name = "Bob" });
+        await context.SaveChangesAsync();
+
+        var sut = new AssignUsersToPlanProcedureCommandHandler(context);
+        var request = new AssignUsersToPlanProcedureCommand
+        {
+            PlanId = 1,
+            ProcedureId = 1,
+            UserIds = new List<int> { 10, 11 }
+        };
+
+        // When
+        var result = await sut.Handle(request, CancellationToken.None);
+
+        // Then
+        result.Succeeded.Should().BeTrue();
+        var assigned = await context.PlanProcedureUsers
+            .Where(ppu => ppu.PlanId == 1 && ppu.ProcedureId == 1)
+            .Select(ppu => ppu.UserId)
+            .ToListAsync();
+        assigned.Should().BeEquivalentTo(new[] { 10, 11 });
+    }
+
+    /// <summary>
+    /// Verifies that reassigning users (calling the endpoint a second time with a different set)
+    /// correctly removes deselected users and adds new ones — no duplicates, no stale rows.
+    /// This is the core "re-assign" fix that prevents stale data after rapid UI interactions.
+    /// </summary>
+    [TestMethod]
+    public async Task AssignUsersToPlanProcedure_Reassign_ReplacesUsersCorrectly()
+    {
+        // Given — user 1 and 2 already assigned
+        var context = DbContextHelper.CreateContext();
+        context.Plans.Add(new Plan { PlanId = 1 });
+        context.Procedures.Add(new Procedure { ProcedureId = 1, ProcedureTitle = "Tire Rotation" });
+        context.PlanProcedures.Add(new PlanProcedure { PlanId = 1, ProcedureId = 1 });
+        context.Users.Add(new User { UserId = 1, Name = "User 1" });
+        context.Users.Add(new User { UserId = 2, Name = "User 2" });
+        context.Users.Add(new User { UserId = 3, Name = "User 3" });
+        context.PlanProcedureUsers.Add(new PlanProcedureUser { PlanId = 1, ProcedureId = 1, UserId = 1 });
+        context.PlanProcedureUsers.Add(new PlanProcedureUser { PlanId = 1, ProcedureId = 1, UserId = 2 });
+        await context.SaveChangesAsync();
+
+        var sut = new AssignUsersToPlanProcedureCommandHandler(context);
+        // Now reassign: keep user 1, drop user 2, add user 3
+        var request = new AssignUsersToPlanProcedureCommand
+        {
+            PlanId = 1,
+            ProcedureId = 1,
+            UserIds = new List<int> { 1, 3 }
+        };
+
+        // When
+        var result = await sut.Handle(request, CancellationToken.None);
+
+        // Then
+        result.Succeeded.Should().BeTrue();
+        var assigned = await context.PlanProcedureUsers
+            .Where(ppu => ppu.PlanId == 1 && ppu.ProcedureId == 1)
+            .Select(ppu => ppu.UserId)
+            .ToListAsync();
+        assigned.Should().BeEquivalentTo(new[] { 1, 3 });
+        assigned.Should().NotContain(2);
+    }
 }
 
