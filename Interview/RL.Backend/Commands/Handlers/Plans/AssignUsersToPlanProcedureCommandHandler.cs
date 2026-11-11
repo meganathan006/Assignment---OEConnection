@@ -32,45 +32,44 @@ public class AssignUsersToPlanProcedureCommandHandler : IRequestHandler<AssignUs
 
             var distinctUserIds = request.UserIds.Distinct().ToList();
 
-            var plan = await _context.Plans.FirstOrDefaultAsync(p => p.PlanId == request.PlanId, cancellationToken);
-            if (plan is null)
-                return ApiResponse<Unit>.Fail(new NotFoundException($"PlanId: {request.PlanId} not found"));
-
-            var procedure = await _context.Procedures.FirstOrDefaultAsync(p => p.ProcedureId == request.ProcedureId, cancellationToken);
-            if (procedure is null)
-                return ApiResponse<Unit>.Fail(new NotFoundException($"ProcedureId: {request.ProcedureId} not found"));
-
+            // A single query that validates PlanId + ProcedureId together and loads assigned users —
+            // eliminates the separate Plan and Procedure round-trips.
             var planProcedure = await _context.PlanProcedures
                 .Include(pp => pp.PlanProcedureUsers)
                 .FirstOrDefaultAsync(pp => pp.PlanId == request.PlanId && pp.ProcedureId == request.ProcedureId, cancellationToken);
 
             if (planProcedure is null)
-                return ApiResponse<Unit>.Fail(new NotFoundException($"PlanProcedure with PlanId: {request.PlanId} and ProcedureId: {request.ProcedureId} not found"));
+                return ApiResponse<Unit>.Fail(new NotFoundException(
+                    $"PlanProcedure not found for PlanId: {request.PlanId}, ProcedureId: {request.ProcedureId}. " +
+                    $"Ensure the procedure has been added to the plan first."));
 
+            // Verify all requested UserIds exist
             if (distinctUserIds.Count > 0)
             {
-                var existingUsers = await _context.Users
+                var existingUserIds = await _context.Users
                     .Where(u => distinctUserIds.Contains(u.UserId))
                     .Select(u => u.UserId)
                     .ToListAsync(cancellationToken);
 
-                var missingUsers = distinctUserIds.Except(existingUsers).ToList();
+                var missingUsers = distinctUserIds.Except(existingUserIds).ToList();
                 if (missingUsers.Any())
-                    return ApiResponse<Unit>.Fail(new NotFoundException($"UserId(s) not found: {string.Join(", ", missingUsers)}"));
+                    return ApiResponse<Unit>.Fail(new NotFoundException(
+                        $"UserId(s) not found: {string.Join(", ", missingUsers)}"));
             }
 
-            // Remove unassigned users
+            // Remove users no longer in the requested set
             var usersToRemove = planProcedure.PlanProcedureUsers
                 .Where(ppu => !distinctUserIds.Contains(ppu.UserId))
                 .ToList();
 
             foreach (var userToRemove in usersToRemove)
-            {
                 planProcedure.PlanProcedureUsers.Remove(userToRemove);
-            }
 
-            // Add new assigned users
-            var currentUserIds = planProcedure.PlanProcedureUsers.Select(ppu => ppu.UserId).ToHashSet();
+            // Add newly requested users
+            var currentUserIds = planProcedure.PlanProcedureUsers
+                .Select(ppu => ppu.UserId)
+                .ToHashSet();
+
             foreach (var userId in distinctUserIds)
             {
                 if (!currentUserIds.Contains(userId))
@@ -88,10 +87,16 @@ public class AssignUsersToPlanProcedureCommandHandler : IRequestHandler<AssignUs
 
             return ApiResponse<Unit>.Succeed(new Unit());
         }
+        catch (DbUpdateConcurrencyException)
+        {
+            // Another request modified the same record concurrently — surface a clear error
+            // so the client can re-fetch and retry rather than silently overwriting.
+            return ApiResponse<Unit>.Fail(new Exception(
+                "The user assignment was modified by another request. Please refresh and try again."));
+        }
         catch (Exception e)
         {
             return ApiResponse<Unit>.Fail(e);
         }
     }
 }
-
